@@ -1,8 +1,3 @@
-# =============================================
-# Visit KL — CI/CD Pipeline
-# 3 Jobs: BUILD → TEST → DEPLOY
-# =============================================
-
 name: Visit KL CI/CD
 
 on:
@@ -11,18 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/visit-kl
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
 
-  # ============ JOB 1: BUILD ============
   build:
-    name: 🔨 Build Docker Image
+    name: Build Docker Image
     runs-on: ubuntu-latest
-
     steps:
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -34,7 +32,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -59,13 +57,12 @@ jobs:
           name: build-info
           path: build_info.txt
 
-  # ============ JOB 2: TEST ============
   test:
-    name: ✅ Test Application
+    name: Test Application
     runs-on: ubuntu-latest
     needs: build
-
     steps:
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -74,7 +71,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull built image
         run: docker pull ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
@@ -92,52 +89,51 @@ jobs:
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
           echo "HTTP Status: $STATUS"
           if [ "$STATUS" != "200" ]; then
-            echo "❌ Test FAILED: Expected 200, got $STATUS"
+            echo "FAILED: Expected 200, got $STATUS"
             exit 1
           fi
-          echo "✅ HTTP 200 OK"
+          echo "HTTP 200 OK"
 
       - name: Test - Health endpoint check
         run: |
           HEALTH=$(curl -s http://localhost:8080/health)
           echo "Health response: $HEALTH"
           if [[ "$HEALTH" != *"healthy"* ]]; then
-            echo "❌ Health check FAILED"
+            echo "Health check FAILED"
             exit 1
           fi
-          echo "✅ Health check passed"
+          echo "Health check passed"
 
       - name: Test - HTML content check
         run: |
           CONTENT=$(curl -s http://localhost:8080/)
           if [[ "$CONTENT" != *"Visit KL"* ]]; then
-            echo "❌ Content check FAILED: 'Visit KL' not found"
+            echo "Content check FAILED: Visit KL not found"
             exit 1
           fi
-          echo "✅ Content check passed"
+          echo "Content check passed"
 
       - name: Test - Security headers check
         run: |
           HEADERS=$(curl -s -I http://localhost:8080/)
           echo "$HEADERS"
           if [[ "$HEADERS" != *"X-Frame-Options"* ]]; then
-            echo "⚠️  Warning: X-Frame-Options header missing"
+            echo "Warning: X-Frame-Options header missing"
           else
-            echo "✅ Security headers present"
+            echo "Security headers present"
           fi
 
       - name: Cleanup test container
         if: always()
         run: docker rm -f visit-kl-test || true
 
-  # ============ JOB 3: DEPLOY ============
   deploy:
-    name: 🚀 Deploy to AWS EC2
+    name: Deploy to AWS EC2
     runs-on: ubuntu-latest
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
     steps:
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -146,7 +142,7 @@ jobs:
         with:
           name: build-info
 
-      - name: Backup to S3
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -165,56 +161,41 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # Login to GHCR
-            echo "${{ secrets.GHCR_TOKEN }}" | \
-              docker login ghcr.io -u areppzubaidi --password-stdin
+            echo "${{ secrets.GITHUB_TOKEN }}" | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-            # Pull the new image
             docker pull ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
-            # Zero-downtime deployment (blue-green style)
-            # Start new container
             docker run -d \
               --name visit-kl-new \
               -p 8081:80 \
               ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
-            # Wait for new container to be healthy
             sleep 5
             NEW_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/health)
 
             if [ "$NEW_STATUS" = "200" ]; then
               echo "New container healthy, switching traffic..."
-
-              # Stop old container
               docker stop visit-kl 2>/dev/null || true
               docker rm visit-kl 2>/dev/null || true
-
-              # Rename new container
-              docker rename visit-kl-new visit-kl
-
-              # Update port mapping: restart on port 80
-              docker stop visit-kl
-              docker rm visit-kl
               docker run -d \
                 --name visit-kl \
                 --restart unless-stopped \
                 -p 80:80 \
                 ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-
-              echo "✅ Deployment successful!"
+              docker rm -f visit-kl-new 2>/dev/null || true
+              echo "Deployment successful!"
             else
-              echo "❌ New container unhealthy, rolling back..."
+              echo "New container unhealthy, rolling back..."
               docker rm -f visit-kl-new
               exit 1
             fi
 
-            # Cleanup old images
             docker image prune -f
 
       - name: Notify deployment success
         run: |
-          echo "🎉 Deployment complete!"
+          echo "Deployment complete!"
           echo "Image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
           echo "Commit: ${{ github.sha }}"
           echo "Time: $(date -u)"
