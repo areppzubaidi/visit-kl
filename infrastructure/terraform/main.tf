@@ -246,3 +246,7 @@ resource "aws_autoscaling_policy" "scale_down" {
   scaling_adjustment     = -1
   cooldown               = 300
 }
+resource "aws_key_pair" "web" {
+  key_name   = "visit-kl-key"
+  public_key = file("~/.ssh/visit-kl-key.pub")
+}
