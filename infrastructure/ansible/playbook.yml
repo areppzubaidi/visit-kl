@@ -1,0 +1,89 @@
+---
+# =============================================
+# Visit KL — Ansible Playbook
+# Configures Ubuntu EC2 instances
+# =============================================
+- name: Configure Visit KL Web Server
+  hosts: all
+  become: true
+  vars:
+    docker_image: "ghcr.io/areppzubaidi/visit-kl:latest"
+    container_name: "visit-kl"
+
+  tasks:
+    - name: Update apt packages
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - nginx
+          - docker.io
+          - curl
+          - unzip
+          - git
+        state: present
+
+    - name: Start and enable services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - docker
+
+    - name: Pull latest Docker image
+      docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+        force_source: yes
+
+    - name: Run Visit KL container
+      docker_container:
+        name: "{{ container_name }}"
+        image: "{{ docker_image }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "8080:80"
+
+    - name: Configure NGINX as reverse proxy
+      copy:
+        dest: /etc/nginx/sites-enabled/visit-kl
+        content: |
+          server {
+              listen 80;
+              server_name _;
+              location /health {
+                  return 200 "healthy\n";
+                  add_header Content-Type text/plain;
+              }
+              location / {
+                  proxy_pass http://localhost:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+
+    - name: Remove default NGINX site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Reload NGINX
+      systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Verify site is running
+      uri:
+        url: "http://localhost/health"
+        return_content: yes
+      register: health_check
+
+    - name: Print health check result
+      debug:
+        msg: "Health check: {{ health_check.content }}"
